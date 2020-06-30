@@ -29,8 +29,8 @@ fn main() {
     // スレッドを起動するspawnのクロージャにはmoveを付けている。これは、
     // スコープ内にある変数(この場合はadd)の所有権を強制的にクロージャ内に移動させる。
     let handles : Vec<_> = chunks
-        // .map(|vv| std::thread::spawn(move || {
-        .map(|vv| std::thread::spawn(|| {
+        .map(|vv| std::thread::spawn(move || {
+        // .map(|vv| std::thread::spawn(|| { // コンパイルエラーになる。READMEに詳細を記載した。
             vv.for_each(|nn| print!("{},", nn + add));
         })
         ).collect();
