@@ -1,4 +1,7 @@
 use clap::{crate_authors, crate_version, App, Arg};
+use std::fs::File;
+use std::path::Path;
+use std::io::prelude::*;
 
 
 fn main() {
@@ -40,4 +43,22 @@ fn main() {
     println!("{:?}", pattern); // 動作確認用
     println!("{:?}", file_paths); // 動作確認用
     println!("{:?}", is_fixed_strings_mode); // 動作確認用
+
+    for file_path in file_paths {
+        let path = Path::new(&file_path);
+        let display = path.display(); // 表示用の文字列を取得する
+        let mut file = match File::open(&path) {
+            Err(why) => panic!("couldn't open {}: {}", display, why.to_string()),
+            Ok(file) => file,
+        };
+        let mut s = String::new();
+        match file.read_to_string(&mut s) {
+            Err(why) => panic!("couldn't read {}: {}", display, why.to_string()),
+            Ok(_) => {
+                for line in s.lines() {
+                    println!("{}", line);
+                }
+            }
+        }
+    }
 }
