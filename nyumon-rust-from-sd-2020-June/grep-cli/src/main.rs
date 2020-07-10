@@ -10,8 +10,6 @@ pub struct GrepResult {
 }
 
 fn main() {
-    println!("Hello, world!");
-
     let matches = App::new("grep")
         .version(crate_version!())
         .author(crate_authors!())
@@ -87,5 +85,24 @@ fn main() {
             }
         }
         results.push(Ok(result));
+    }
+
+    let mut errors = vec![];
+    for result in results {
+        match result {
+            Ok(result) => {
+                if result.hit_lines.len() > 0 {
+                    for line in result.hit_lines {
+                        println!("{}:{}", result.file_path, line);
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(e);
+            }
+        }
+    }
+    for e in errors {
+        println!("{}", e);
     }
 }
