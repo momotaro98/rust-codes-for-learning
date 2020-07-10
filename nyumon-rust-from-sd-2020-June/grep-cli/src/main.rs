@@ -1,8 +1,13 @@
 use clap::{crate_authors, crate_version, App, Arg};
-use std::fs::File;
+use grep_core::Matcher;
+use std::fs::{metadata, File};
 use std::path::Path;
 use std::io::prelude::*;
 
+pub struct GrepResult {
+    pub file_path: String,
+    pub hit_lines: Vec<String>,
+}
 
 fn main() {
     println!("Hello, world!");
@@ -39,14 +44,33 @@ fn main() {
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
     let is_fixed_strings_mode = matches.is_present("fixed-strings");
-    println!("{:?}", matches); // 動作確認用
-    println!("{:?}", pattern); // 動作確認用
-    println!("{:?}", file_paths); // 動作確認用
-    println!("{:?}", is_fixed_strings_mode); // 動作確認用
+    let matcher = Matcher::new(pattern.to_string(), is_fixed_strings_mode); // 自作のgrep-coreライブラリ
 
+    let mut results = vec![];
     for file_path in file_paths {
         let path = Path::new(&file_path);
         let display = path.display(); // 表示用の文字列を取得する
+        let mut result = GrepResult {
+            file_path: file_path.clone(), // 所有権が取らてしまうとその先でfile_pathが使えなくなるのでCloneする
+            hit_lines: vec![], // `vec![]`はVec構造体を宣言する際に使いやすいマクロ
+        };
+
+        // 異常入力時のエラーハンドリング
+        match metadata(&path) {
+            Ok(md) => {
+                if md.is_dir() {
+                    // return Err(format!("{} is directory", display));
+                    results.push(Err(format!("{} is directory", display)));
+                    continue;
+                }
+            }
+            Err(e) => {
+                // return Err(format!("{}: {}", e.to_string(), display));
+                results.push(Err(format!("{}: {}", e.to_string(), display)));
+                continue;
+            }
+        }
+
         let mut file = match File::open(&path) {
             Err(why) => panic!("couldn't open {}: {}", display, why.to_string()),
             Ok(file) => file,
@@ -56,9 +80,12 @@ fn main() {
             Err(why) => panic!("couldn't read {}: {}", display, why.to_string()),
             Ok(_) => {
                 for line in s.lines() {
-                    println!("{}", line);
+                    if matcher.execute(line) {
+                        result.hit_lines.push(line.to_string());
+                    }
                 }
             }
         }
+        results.push(Ok(result));
     }
 }

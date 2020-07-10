@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 clap = "2.33.1"
+grep-core = { git = "https://github.com/forcia/software-design-2020-06-grep-core.git" }
