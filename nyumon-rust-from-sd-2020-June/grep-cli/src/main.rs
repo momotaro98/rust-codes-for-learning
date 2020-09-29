@@ -3,6 +3,7 @@ use grep_core::Matcher;
 use std::fs::{metadata, File};
 use std::path::Path;
 use std::io::prelude::*;
+use std::thread;
 
 pub struct GrepResult {
     pub file_path: String,
@@ -44,61 +45,63 @@ fn main() {
     let is_fixed_strings_mode = matches.is_present("fixed-strings");
     let matcher = Matcher::new(pattern.to_string(), is_fixed_strings_mode); // 自作のgrep-coreライブラリ
 
-    let mut results = vec![];
+    let mut handles = vec![];
     for file_path in file_paths {
-        let path = Path::new(&file_path);
-        let display = path.display(); // 表示用の文字列を取得する
-        let mut result = GrepResult {
-            file_path: file_path.clone(), // 所有権が取らてしまうとその先でfile_pathが使えなくなるのでCloneする
-            hit_lines: vec![], // `vec![]`はVec構造体を宣言する際に使いやすいマクロ
-        };
+        let matcher = matcher.clone();
+        let handle = thread::spawn(move || {
+            let path = Path::new(&file_path);
+            let display = path.display(); // 表示用の文字列を取得する
+            let mut result = GrepResult {
+                file_path: file_path.clone(), // 所有権が取らてしまうとその先でfile_pathが使えなくなるのでCloneする
+                hit_lines: vec![], // `vec![]`はVec構造体を宣言する際に使いやすいマクロ
+            };
 
-        // 異常入力時のエラーハンドリング
-        match metadata(&path) {
-            Ok(md) => {
-                if md.is_dir() {
-                    // return Err(format!("{} is directory", display));
-                    results.push(Err(format!("{} is directory", display)));
-                    continue;
+            // 異常入力時のエラーハンドリング
+            match metadata(&path) {
+                Ok(md) => {
+                    if md.is_dir() {
+                        return Err(format!("{} is directory", display));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("{}: {}", e.to_string(), display));
                 }
             }
-            Err(e) => {
-                // return Err(format!("{}: {}", e.to_string(), display));
-                results.push(Err(format!("{}: {}", e.to_string(), display)));
-                continue;
-            }
-        }
 
-        let mut file = match File::open(&path) {
-            Err(why) => panic!("couldn't open {}: {}", display, why.to_string()),
-            Ok(file) => file,
-        };
-        let mut s = String::new();
-        match file.read_to_string(&mut s) {
-            Err(why) => panic!("couldn't read {}: {}", display, why.to_string()),
-            Ok(_) => {
-                for line in s.lines() {
-                    if matcher.execute(line) {
-                        result.hit_lines.push(line.to_string());
+            let mut file = match File::open(&path) {
+                Err(why) => panic!("couldn't open {}: {}", display, why.to_string()),
+                Ok(file) => file,
+            };
+            let mut s = String::new();
+            match file.read_to_string(&mut s) {
+                Err(why) => panic!("couldn't read {}: {}", display, why.to_string()),
+                Ok(_) => {
+                    for line in s.lines() {
+                        if matcher.execute(line) {
+                            result.hit_lines.push(line.to_string());
+                        }
                     }
                 }
             }
-        }
-        results.push(Ok(result));
+            return Ok(result);
+        });
+        handles.push(handle);
     }
 
     let mut errors = vec![];
-    for result in results {
-        match result {
-            Ok(result) => {
-                if result.hit_lines.len() > 0 {
-                    for line in result.hit_lines {
-                        println!("{}:{}", result.file_path, line);
+    for handle in handles {
+        if let Ok(result) = handle.join() {
+            match result {
+                Ok(result) => {
+                    if result.hit_lines.len() > 0 {
+                        for line in result.hit_lines {
+                            println!("{}:{}", result.file_path, line);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                errors.push(e);
+                Err(e) => {
+                    errors.push(e);
+                }
             }
         }
     }
