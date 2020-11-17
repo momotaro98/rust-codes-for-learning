@@ -1,5 +1,5 @@
 [package]
-name = "sec2-using-trait-objects-that-allows-values-of-different-types"
+name = "gui"
 version = "0.1.0"
 authors = ["Shintaro Ikeda <ikenshirogivenup98@gmail.com>"]
 edition = "2018"
