@@ -1,7 +1,20 @@
 use std::thread;
 
+pub struct Worker {
+    id: usize,
+    thread: thread::JoinHandle<()>,
+}
+
+impl Worker {
+    fn new(id: usize) -> Worker {
+        let thread = thread::spawn(|| {});
+
+        Worker {id, thread}
+    }
+}
+
 pub struct ThreadPool {
-    threads: Vec<thread::JoinHandle<()>>,
+    workers: Vec<Worker>,
 }
 
 impl ThreadPool {
@@ -9,13 +22,13 @@ impl ThreadPool {
         assert!(size > 0);
         // if size <= 0 then got > thread 'main' panicked at 'assertion failed: size > 0', src/lib.rs:5:9
 
-        let mut threads = Vec::with_capacity(size);
+        let mut workers = Vec::with_capacity(size);
 
-        for _ in 0..size {
-            // create some threads and store them in the vector
+        for id in 0..size {
+            workers.push(Worker::new(id));
         }
 
-        ThreadPool { threads }
+        ThreadPool { workers }
     }
 
     pub fn execute<F>(&self, f: F)
