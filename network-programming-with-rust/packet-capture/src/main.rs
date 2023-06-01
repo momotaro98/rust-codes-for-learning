@@ -110,6 +110,13 @@ fn ipv6_handler(ethernet: &EthernetPacket) {
 fn tcp_handler(packet: &dyn GettableEndPoints) {
     let tcp = TcpPacket::new(packet.get_payload());
     if let Some(tcp) = tcp {
+        /*
+        【My Note】
+        tcp_handler<T: GettableEndpoints>のようにして、動的ディスパッチを避け静的ディスパッチにするようにしたかったが、
+        ここの`tcp: TcpPacket`がGettableEndPointsの型とみなせないというコンパイルエラーが出た。
+        どうもTcpPacketがGettableEndPointsを実装していてもプログラムスコープ内でGettableEndPointsを明確にしないとダメらしい。
+        書籍の通りに&dyn GettableEndpointを引数とする動的ディスパッチにするとコンパイルが通る。
+         */
         print_packet_info(packet, &tcp, "TCP");
     }
 }
