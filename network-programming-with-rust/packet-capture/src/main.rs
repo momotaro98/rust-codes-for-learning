@@ -112,7 +112,7 @@ fn tcp_handler(packet: &dyn GettableEndPoints) {
     if let Some(tcp) = tcp {
         /*
         【My Note】
-        tcp_handler<T: GettableEndpoints>のようにして、動的ディスパッチを避け静的ディスパッチにするようにしたかったが、
+        tcp_handler<T: GettableEndpoints>のようにして、動的ディスパッチ(trait object)を避け静的ディスパッチ(generics)にするようにしたかったが、
         ここの`tcp: TcpPacket`がGettableEndPointsの型とみなせないというコンパイルエラーが出た。
         どうもTcpPacketがGettableEndPointsを実装していてもプログラムスコープ内でGettableEndPointsを明確にしないとダメらしい。
         書籍の通りに&dyn GettableEndpointを引数とする動的ディスパッチにするとコンパイルが通る。
