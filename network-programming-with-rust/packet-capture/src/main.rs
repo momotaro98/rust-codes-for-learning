@@ -153,6 +153,17 @@ fn print_packet_info(
     let len = payload.len();
 
     // Show payload
+    /*
+    The output will be like the following
+
+captured a TCP packet from 192.168.10.101|58495 to 20.27.177.116|443
+
+17 03 03 00 4C A3 56 96 11 97 D5 DB BC 00 C0 C3 26 DC 49 EB | ....L.V...........I.
+57 54 32 2F B7 95 38 56 FD 44 F6 83 E3 B7 3D B8 B8 C9 6E C0 | WT.....V.D........n.
+6C 45 A9 83 83 34 C0 79 AC 45 E2 24 2E B3 2E A6 87 29 79 1F | lE.....y.E........y.
+E1 82 93 8F 81 1E 67 F5 2D EF 99 CA 7A 89 D7 C5 13 89 D4 6E | ......g.....z......n
+93    
+     */
     // Do the showing with the specified const width
     for i in 0..len {
         print!("{:<02X} ", payload[i]); // print normally
