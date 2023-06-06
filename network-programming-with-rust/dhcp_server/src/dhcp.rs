@@ -156,6 +156,11 @@ impl DhcpPacket {
         self.buffer[CHADDR..CHADDR + 6].copy_from_slice(&macaddr_value);
     }
 
+    pub fn set_magic_cookie(&mut self, cursor: &mut usize) {
+        self.buffer[*cursor..*cursor + 4].copy_from_slice(&[0x63, 0x82, 0x53, 0x63]);
+        *cursor += 4;
+    }
+
     /**
      * DHCPパケットのoptionフィールドをセットする。
      * optionフィールドは複数のコードが存在する。
