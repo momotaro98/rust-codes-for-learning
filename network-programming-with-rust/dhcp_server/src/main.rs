@@ -210,13 +210,11 @@ fn select_lease_ip(
     // // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
     match received_packet.get_option(Code::RequestedIpAddress as u8) {
         Some(ip) => {
-            if let Some(requested_ip) = util::u8_to_ipv4addr(&ip) {
-                // Search from address pool
-                if let Some(ip_from_pool) = dhcp_server.pick_specified_ip(requested_ip) {
-                    if util::is_ipaddr_available(ip_from_pool).is_ok() {
-                        return Ok(ip_from_pool);
-                    }
-                }
+            let requested_ip = util::u8_to_ipv4addr(&ip).unwrap();
+            // Search from address pool
+            let ip_from_pool = dhcp_server.pick_specified_ip(requested_ip).unwrap();
+            if util::is_ipaddr_available(ip_from_pool).is_ok() {
+                return Ok(ip_from_pool);
             }
         }
         None => (),

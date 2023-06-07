@@ -26,11 +26,63 @@ fn create_default_icmp_buffer() -> [u8; 8] {
 }
 
 /**
- * IPアドレスが利用可能か調べる
+ * 対象のIPアドレスが利用可能か調べる
+ * 調べる方法として ICMPのEchoメッセージ(Pingコマンドと同じ内容)を投げる
  */
 pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
-    // TODO: implement
-    Ok(())
+    let icmp_buf = create_default_icmp_buffer();
+
+    // ARPではなくICMPを利用する。別のセグメントにも送信可能なため。
+    let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
+
+    // pnetサードパーティが libc:socket を呼んで送信用と受信用の2つのソケットを作成してくれる。
+    let (mut transport_sender, mut transport_receiver)
+        = transport::transport_channel(
+            1024,
+            TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
+    )?;
+    
+    // ICMP Echoをネットワークへ投げる。
+    transport_sender.send_to(icmp_packet, IpAddr::V4(target_ip))?;
+
+    // [note] ICMPのリクエスト結果をRustのChannelを使って非同期に受け取る。
+    let (channel_sender, channel_receiver) = mpsc::channel();
+
+    // ICMP echoリクエストのリプライに対してタイムアウトを設定するため、スレッドを起動する。
+    // このスレッドはEchoリプライを受信するまで残り続ける。
+    thread::spawn(move || {
+        // ICMP Echoの結果を受信する。
+        let mut iter = icmp_packet_iter(&mut transport_receiver);
+        let (packet, _) = iter.next().unwrap(); // レスポンスが返るまでブロックする
+
+        if packet.get_icmp_type() == IcmpTypes::EchoReply {
+            match channel_sender.send(true) { // channel_receiverへ合図として意味しかない`true`を投げる。
+                Err(_) => {
+                    // 制限時間を超過してリプライが届いた場合
+                    //
+                    // [note] ここでエラーになるのは下記の channel_receiver.recv_timeout(Duration::from_millis(200)) にて、
+                    // タイムアウトになりChannel受信側が送信を受け付けないときである。
+                    info!("icmp timeout"); // ← なので"ICMPタイムアウト"ではなく、自分で設定したタイムアウトだと思う。
+                }
+                _ => {
+                    // Channel送信できた場合は何もせず終了
+                    return;
+                }
+            }
+        }
+    });
+
+    if channel_receiver.recv_timeout(Duration::from_millis(200)).is_ok() {
+        // 制限時間内にEchoリプライが届いた場合。IPアドレスは使われている。
+        Err(failure::format_err!(
+            "ip addr already in use: {}",
+            target_ip
+        ))
+    } else {
+        // タイムアウトした時。アドレスは使われていない。
+        debug!("not received reply within timeout");
+        Ok(())
+    }
 }
 
 /**
