@@ -1,5 +1,5 @@
 use pnet::util::MacAddr;
-use rusqlite::{params, Connection, Rows, Transaction, NO_PARAMS};
+use rusqlite::{params, Connection, Rows, Transaction};
 use std::net::Ipv4Addr;
 
 /**
@@ -34,7 +34,7 @@ pub fn select_addresses(
         get_addresses_from_row(ip_addrs)
     } else {
         let mut statement = con.prepare("SELECT ip_addr FROM lease_entries")?;
-        let ip_addrs = statement.query(NO_PARAMS)?;
+        let ip_addrs = statement.query(params![])?;
         get_addresses_from_row(ip_addrs)
     }
 }
