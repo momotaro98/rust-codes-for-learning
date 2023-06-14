@@ -72,6 +72,42 @@ impl TCP {
         tcp
     }
 
+    /// リスニングソケットを生成してソケットIDを返す
+    /// 
+    /// [note] listenはサーバ側アプリケーションが初めに呼ぶメソッド。
+    pub fn listen(&self, local_addr: Ipv4Addr, local_port: u16) -> Result<SockID> {
+        let socket = Socket::new(
+            local_addr,
+            UNDETERMINED_IP_ADDR, // まだ接続先IPアドレスは未定
+            local_port,
+            UNDETERMINED_PORT, // まだ接続先ポート番号は未定
+            TcpStatus::Listen,
+        )?;
+        let mut lock = self.sockets.write().unwrap();
+        let sock_id = socket.get_sock_id();
+        lock.insert(sock_id, socket); // リスニングソケット(唯一)もソケットテーブルに登録する
+        Ok(sock_id)
+    }
+
+    /// 接続済みソケットが生成されるまで待機し，生成されたらそのIDを返す
+    /// 
+    /// [note] acceptはサーバ側アプリケーションがlisten後に呼ぶメソッド。acceptから返ったときTCP接続済みの口をアプリは手に入る。
+    /// acceptはリスニングソケットを引数に受け取り、リスニングソケットが持っているソケットのキューから取ってくる(Dequeue)。
+    /// そのソケットのキューにEnqueueしているのが、SYNRCVD状態のソケットに到着したパケットの処理をする synrcvd_handler である。
+    /// synrcvd_handler はクライアント側からSYN→(res:SYN|ACK)→ACKと最後のACKが返りコネクション確立完了時のハンドラである。
+    pub fn accept(&self, listening_sock_id: SockID) -> Result<SockID> {
+        // [note] synrcvd_handler 内でTCPが持つMutex,Condvarの非同期キュー(のようなもの)で、イベント通知されるまでここで待つ。
+        self.wait_event(listening_sock_id, TCPEventKind::ConnectionCompleted);
+
+        let mut table = self.sockets.write().unwrap();
+        Ok(table
+            .get_mut(&listening_sock_id)
+            .context(format!("no such socket: {:?}", listening_sock_id))?
+            .connected_connection_queue // [note] リスニングソケットが持つソケットキューからDequeueする
+            .pop_front()
+            .context("no connected socket")?)
+    }
+
     // TCP接続のためにローカルポート番号をランダム関数を利用して選ぶ
     fn select_unused_port(&self, rng: &mut ThreadRng) -> Result<u16> {
         for _ in 0..(PORT_RANGE.end - PORT_RANGE.start) { // [note] ここは別にRANGE分試行しなくても良いはず
@@ -222,8 +258,8 @@ impl TCP {
             // [note] 受信したパケットとその受信したパケットに対応するソケットを引数にして、ソケットのステータス状況に応じてハンドリングする
             let sock_id = socket.get_sock_id();
             if let Err(error) = match socket.status {
-                // TcpStatus::Listen => self.listen_handler(table, sock_id, &packet, remote_addr),
-                // TcpStatus::SynRcvd => self.synrcvd_handler(table, sock_id, &packet),
+                TcpStatus::Listen => self.listen_handler(table, sock_id, &packet, remote_addr),
+                TcpStatus::SynRcvd => self.synrcvd_handler(table, sock_id, &packet),
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
                 // TcpStatus::Established => self.established_handler(socket, &packet),
                 // TcpStatus::CloseWait | TcpStatus::LastAck => self.close_handler(socket, &packet),
@@ -238,6 +274,106 @@ impl TCP {
         }
     }    
 
+    /*
+    【書籍】
+    listen_handler と synrcvd_handler の
+    mut table: RwLockWriteGuard<HashMap<SockID, Socket>>,
+    の引数について
+    >
+    > ここで生成したソケットはSYN|ACKセグメントを送り返して，ソケットのハッシュテーブルに新たに登録されます．
+    > よって，テーブルに対する書き込みロックが必要になります．一方でリスト3.28のmatchの前ですでに書き込みロックを取得しているため，
+    > listen_handler内部でロックを取得しようとするとデッドロックを起こします．
+    > そのため，matchの前で一度テーブルに対するロックをdropしてlisten_handler内部で再取得するか，ロックを取得した状態のテーブルをハンドラに渡す必要があります．
+    > ここでは、後者の手段をとっており，ハンドラの引数にあるハッシュテーブルがRwLockWriteGuard<HashMap<SockID,Socket>>となっているのはそのためです．
+    > Teruya Ono. Rust TCP Book (Japanese Edition) (p. 93). Kindle Edition.     
+    */
+
+    /// [note] サーバ側 (Passive Open) のハンドリング
+    /// LISTEN状態のソケットに到着したパケットの処理
+    fn listen_handler(
+        &self,
+        mut table: RwLockWriteGuard<HashMap<SockID, Socket>>,
+        listening_socket_id: SockID,
+        packet: &TCPPacket,
+        remote_addr: Ipv4Addr,
+    ) -> Result<()> {
+        dbg!("listen handler");
+        if packet.get_flag() & tcpflags::ACK > 0 {
+            // 本来ならRSTをsendする
+            return Ok(());
+        }
+        let listening_socket = table.get_mut(&listening_socket_id).unwrap();
+        if packet.get_flag() & tcpflags::SYN > 0 {
+            // passive openの処理
+            // 後に接続済みソケットとなるソケットを新たに生成する
+            // [note] Listenしていて新しくクライアントからSYNが来た時点で、
+            // 相手のIPとポートとわかっているので、接続完了後に利用するソケットを作って処理の最後にソケットテーブルに入れておく。
+            let mut connection_socket = Socket::new(
+                listening_socket.local_addr,
+                remote_addr,
+                listening_socket.local_port,
+                packet.get_src(),
+                TcpStatus::SynRcvd,
+            )?;
+
+            // [note] TCPの仕様に従って接続完了後ソケットの情報の初期設定をしておく。
+            connection_socket.recv_param.next = packet.get_seq() + 1;
+            connection_socket.recv_param.initial_seq = packet.get_seq();
+            connection_socket.send_param.initial_seq = rand::thread_rng().gen_range(1..1 << 31);
+            connection_socket.send_param.window = packet.get_window_size();
+            connection_socket.send_tcp_packet(
+                connection_socket.send_param.initial_seq,
+                connection_socket.recv_param.next,
+                tcpflags::SYN | tcpflags::ACK,
+                &[],
+            )?;
+            connection_socket.send_param.next = connection_socket.send_param.initial_seq + 1;
+            connection_socket.send_param.unacked_seq = connection_socket.send_param.initial_seq;
+
+            // [note] synrcvd_handler でリスニングソケットが持つ接続キューへここで生成したソケットをEnqueueするため、
+            // 接続ソケットからリスニングソケットを特定できるように接続ソケットへリスニングソケットIDを持たせておく。
+            connection_socket.listening_socket = Some(listening_socket.get_sock_id());
+
+            dbg!("status: listen -> ", &connection_socket.status);
+            table.insert(connection_socket.get_sock_id(), connection_socket);
+        }
+        Ok(())
+    }
+
+    /// [note] サーバ側 (Passive Open) のハンドリング
+    /// SYNRCVD状態のソケットに到着したパケットの処理
+    fn synrcvd_handler(
+        &self,
+        mut table: RwLockWriteGuard<HashMap<SockID, Socket>>,
+        connecting_sock_id: SockID,
+        packet: &TCPPacket,
+    ) -> Result<()> {
+        dbg!("synrcvd handler");
+        let socket = table.get_mut(&connecting_sock_id).unwrap();
+
+        if packet.get_flag() & tcpflags::ACK > 0
+            && socket.send_param.unacked_seq <= packet.get_ack()
+            && packet.get_ack() <= socket.send_param.next
+        {
+            // [note]通信ソケットの状態を更新する
+            socket.recv_param.next = packet.get_seq();
+            socket.send_param.unacked_seq = packet.get_ack();
+            socket.status = TcpStatus::Established;
+            dbg!("status: synrcvd ->", &socket.status);
+
+            if let Some(id) = socket.listening_socket {
+                let listening_socket = table.get_mut(&id).unwrap();
+                // [note] accept メソッドに教えてあげる(通知する)ために、
+                // ① リスニングソケットに接続済みソケットをEnqueueし、
+                // ② TCPが持つ接続イベントを発火させる。
+                listening_socket.connected_connection_queue.push_back(connecting_sock_id);                  // ①
+                self.publish_event(listening_socket.get_sock_id(), TCPEventKind::ConnectionCompleted); // ②
+            }
+        }
+        Ok(())
+    }
+
+    /// [note] クライアント側 (Active Open) のハンドリング
     /// SYNSENT状態のソケットに到着したパケットの処理
     /// [note] TCPの仕様(RFC)に従って SYNSENT状態であるソケットの状態(recv_param, send_param)を更新する。
     fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
