@@ -606,6 +606,9 @@ impl TCP {
             // ACKが立っていないパケットは破棄
             return Ok(());
         }
+        if !packet.payload().is_empty() {
+            self.process_payload(socket, &packet)?;
+        }
         Ok(())
     }
 
@@ -624,6 +627,76 @@ impl TCP {
                 break;
             }
         }
+    }
+
+    /// データをバッファに読み込んで，読み込んだサイズを返す．FINを読み込んだ場合は0を返す
+    /// パケットが届くまでブロックする
+    pub fn recv(&self, sock_id: SockID, buffer: &mut [u8]) -> Result<usize> {
+        let mut table = self.sockets.write().unwrap();
+        let mut socket = table
+            .get_mut(&sock_id)
+            .context(format!("no such socket: {:?}", sock_id))?;
+        let mut received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
+        while received_size == 0 {
+            // ペイロードを受信 or FINを受信でスキップ
+            match socket.status {
+                TcpStatus::CloseWait | TcpStatus::LastAck | TcpStatus::TimeWait => break,
+                _ => {}
+            }
+            // ロックを外してイベントの待機．受信スレッドがロックを取得できるようにするため．
+            drop(table);
+            dbg!("waiting incoming data");
+            self.wait_event(sock_id, TCPEventKind::DataArrived);
+            table = self.sockets.write().unwrap();
+            socket = table
+                .get_mut(&sock_id)
+                .context(format!("no such socket: {:?}", sock_id))?;
+            received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
+        }
+        let copy_size = cmp::min(buffer.len(), received_size);
+        buffer[..copy_size].copy_from_slice(&socket.recv_buffer[..copy_size]);
+        socket.recv_buffer.copy_within(copy_size.., 0);
+        socket.recv_param.window += copy_size as u16;
+        Ok(copy_size)
+    }
+
+    /// パケットのペイロードを受信バッファにコピーする
+    /// 
+    /// [note] 受信側ではPayloadセグメントの順番がずれて送られてくる場合を対処する必要がある。
+    /// その制御のために以下の情報を用いて、順番がずれたとき、順番がずれてないとき、両方をこのメソッドでハンドリングしている。
+    /// * socket.recv_param.next    - 次に受け取ることを期待するPayloadの位置
+    /// * socket.recv_param.tail    - 現状受け取っている最新のPayloadの位置
+    /// * socket.recv_param.window  - ソケットで持つ現状のウィンドウサイズ
+    /// * packet.get_seq()          - 受信したパケットが示すPayloadの位置
+    fn process_payload(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        // バッファにおける読み込みのヘッド位置．
+        let offset = socket.recv_buffer.len() - socket.recv_param.window as usize
+            + (packet.get_seq() - socket.recv_param.next) as usize;
+        let copy_size = cmp::min(packet.payload().len(), socket.recv_buffer.len() - offset);
+        socket.recv_buffer[offset..offset + copy_size]
+            .copy_from_slice(&packet.payload()[..copy_size]);
+        socket.recv_param.tail =
+            cmp::max(socket.recv_param.tail, packet.get_seq() + copy_size as u32); // ロス再送の際穴埋めされるためにmaxをとる
+
+        if packet.get_seq() == socket.recv_param.next {
+            // 順序入れ替わり無しの場合のみrecv_param.nextを進められる
+            socket.recv_param.next = socket.recv_param.tail;
+            socket.recv_param.window -= (socket.recv_param.tail - packet.get_seq()) as u16;
+        }
+        if copy_size > 0 {
+            // 受信バッファにコピーが成功
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                tcpflags::ACK,
+                &[],
+            )?;
+        } else {
+            // 受信バッファが溢れた時はセグメントを破棄
+            dbg!("recv buffer overflow");
+        }
+        self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
+        Ok(())
     }
 }
 

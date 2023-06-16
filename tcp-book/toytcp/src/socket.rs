@@ -25,6 +25,9 @@ pub struct Socket {
     pub recv_param: RecvParam,
     pub status: TcpStatus,
 
+    // Section 3.8.1 受信バッファ
+    pub recv_buffer: Vec<u8>, // [note] 受信したデータを一度にすべて処理しようとすると問題が生じるので通常ソケットは受信バッファを持つ
+
     // Section 3.7.4 確認応答と再送
     pub retransmission_queue: VecDeque<RetransmissionQueueEntry>,
 
@@ -194,6 +197,7 @@ impl Socket {
                 tail: 0,
             },
             status,
+            recv_buffer: vec![0; SOCKET_BUFFER_SIZE],
             retransmission_queue: VecDeque::new(),
             connected_connection_queue: VecDeque::new(),
             listening_socket: None,
