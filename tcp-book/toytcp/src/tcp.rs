@@ -191,6 +191,40 @@ impl TCP {
         // このメソッドが終わるとき(eventがスコープから抜けるとき)eventが持っているLockは開放される。
     }
 
+    /// バッファのデータを送信する。必要であれば複数パケットに分割して送信する。
+    /// 全て送信したら(まだACK)されてなくてもreturnする。
+    pub fn send(&self, sock_id: SockID, buffer: &[u8]) -> Result<()> {
+        let mut cursor = 0;
+
+        while cursor < buffer.len() {
+            let mut table = self.sockets.write().unwrap();
+            let socket = table
+                .get_mut(&sock_id)
+                .context(format!("no such socket: {:?}", sock_id))?;
+            let send_size = cmp::min(MSS, buffer.len() - cursor);
+            // TODO: MSS について記載
+
+            let seq = socket.send_param.next;
+            let ack = socket.recv_param.next;
+            let flag = tcpflags::ACK;
+            let payload = &buffer[cursor..cursor + send_size];
+
+            socket.send_tcp_packet(
+                seq,
+                ack,
+                flag,
+                payload,
+            )?;
+
+            cursor += send_size;
+            // 【書籍】
+            // > 送信後はそのペイロードのサイズ分だけsocket.send_param.nextを進めています
+            // > Teruya Ono. Rust TCP Book (Japanese Edition) (p. 105). Kindle Edition. 
+            socket.send_param.next += send_size as u32;
+        }
+        Ok(())
+    }
+
     /// 受信スレッド用の関数．
     /// [note] 受信スレッドのEntry Point
     /// [やっていること] IPレイヤからパケットを受け取り、自作のTCPソケット群で対応するソケットを検索し、処理ハンドラへ渡す。
