@@ -280,8 +280,12 @@ impl TCP {
                 .context(format!("no such socket: {:?}", sock_id))?;
 
             let mut send_size = cmp::min(
+                // [note] ref: https://www.infraexpert.com/info/5adsl.htm
+                // > MSSはMTUからTCP/IPヘッダ（40byte）をマイナスした値で、「MSS = MTU - 40」となります。
+                // > MTUとは一回のデータ転送で送信可能なIPデータグラムの最大値のことです。EthernetLANでは
+                // > Ethernetフレームが最大1518byteなので、Ethernetヘッダ（14byte）と FCS（4byte）を除く
+                // > 1500byteがMTUサイズとなります。
                 MSS,
-                // TODO: MSS について記載
                 cmp::min(socket.send_param.window as usize, buffer.len() - cursor),
             );
 
