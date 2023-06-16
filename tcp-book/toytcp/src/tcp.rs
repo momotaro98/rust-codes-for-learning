@@ -69,8 +69,85 @@ impl TCP {
             cloned_tcp.receive_handler().unwrap();
         });
 
+        // Section 3.7.4 再送処理用のタイマー用スレッドの生成
+        let cloned_tcp = tcp.clone();
+        std::thread::spawn(move || {
+            cloned_tcp.timer();
+        });
+
         tcp
     }
+
+    /// タイマースレッド用の関数
+    /// 全てのソケットの再送キューを見て，タイムアウトしているパケットを再送する
+    /// 
+    /// 【書籍】 Section 3.7.4 確認応答と再送
+    /// 全てのソケットの再送キューに入っているエントリを継続的に取り出し，エンキューされた時刻からの経過時間を見て再送を実行するか否かの判断をします．
+    /// もしタイムアウトしていれば再送し，次の再送に備えて再びキューに入れますが，この時の再送タイムアウト時間（RTO）の選び方は重要な問題です．
+    /// もし短すぎる場合はパケットロスが発生していないにも関わらず再送が発生してしまい，逆に長すぎる場合はパケットロスからの再送が遅れてしまいます．
+    /// RFC1122及びRFC6298ではRTOの決定方法について記述されており，基本的には継続的にRTTを計測し，
+    /// その値を元にタイムアウト時間を動的に決定するといった手法が取られます．ToyTCPではそこまでは行わず，定数秒でタイムアウトするようにしています．
+    /// > Teruya Ono. Rust TCP Book (Japanese Edition) (pp. 115-116). Kindle Edition. 
+    fn timer(&self) {
+        dbg!("begin timer thread");
+        loop {
+            let mut table = self.sockets.write().unwrap();
+            for (sock_id, socket) in table.iter_mut() {
+                while let Some(mut item) = socket.retransmission_queue.pop_front() {
+                    // 再送キューからackされたセグメントを除去する
+                    // established state以外の時に送信されたセグメントを除去するために必要
+                    if socket.send_param.unacked_seq > item.packet.get_seq() {
+                        // ackされてる
+                        dbg!("successfully acked", item.packet.get_seq());
+                        socket.send_param.window += item.packet.payload().len() as u16;
+                        self.publish_event(*sock_id, TCPEventKind::Acked);
+                        if item.packet.get_flag() & tcpflags::FIN > 0
+                            && socket.status == TcpStatus::LastAck
+                        {
+                            self.publish_event(*sock_id, TCPEventKind::ConnectionClosed);
+                        }
+                        continue;
+                    }
+                    // タイムアウトを確認
+                    if item.latest_transmission_time.elapsed().unwrap()
+                        < Duration::from_secs(RETRANSMITTION_TIMEOUT)
+                        // [note]             ↑RTO(タイムアウト時間は固定にしている。実際のTCP仕様と実装ではRTT(普段のレイテンシ値)により動的に決めている)
+                    {
+                        // 取り出したエントリがタイムアウトしてないなら，キューの以降のエントリもタイムアウトしてない
+                        // 先頭に戻す
+                        socket.retransmission_queue.push_front(item);
+                        break;
+                    }
+                    // ackされてなければ再送
+                    if item.transmission_count < MAX_TRANSMITTION {
+                        // 再送
+                        dbg!("retransmit");
+                        socket
+                            .sender
+                            .send_to(item.packet.clone(), IpAddr::V4(socket.remote_addr))
+                            .context("failed to retransmit")
+                            .unwrap();
+                        item.transmission_count += 1;
+                        item.latest_transmission_time = SystemTime::now();
+                        socket.retransmission_queue.push_back(item);
+                        break;
+                    } else {
+                        dbg!("reached MAX_TRANSMITTION");
+                        if item.packet.get_flag() & tcpflags::FIN > 0
+                            && (socket.status == TcpStatus::LastAck
+                                || socket.status == TcpStatus::FinWait1
+                                || socket.status == TcpStatus::FinWait2)
+                        {
+                            self.publish_event(*sock_id, TCPEventKind::ConnectionClosed);
+                        }
+                    }
+                }
+            }
+            // ロックを外して待機する
+            drop(table);
+            thread::sleep(Duration::from_millis(100));
+        }
+    }    
 
     /// リスニングソケットを生成してソケットIDを返す
     /// 
@@ -198,11 +275,35 @@ impl TCP {
 
         while cursor < buffer.len() {
             let mut table = self.sockets.write().unwrap();
-            let socket = table
+            let mut socket = table
                 .get_mut(&sock_id)
                 .context(format!("no such socket: {:?}", sock_id))?;
-            let send_size = cmp::min(MSS, buffer.len() - cursor);
-            // TODO: MSS について記載
+
+            let mut send_size = cmp::min(
+                MSS,
+                // TODO: MSS について記載
+                cmp::min(socket.send_param.window as usize, buffer.len() - cursor),
+            );
+
+            while send_size == 0 {
+                // [note] ここのスコープに入るのは、ウィンドウサイズが0で枯渇しているとき
+                //  ↑ つまり、連続で送信し過ぎで受信が追いついていない状態のとき
+                // 受信されてウィンドウサイズが回復することをロックを外してwait_eventで待つことをしている。
+                dbg!("unable to slide send window");
+                // ロックを外してイベントの待機．受信スレッドがロックを取得できるようにするため．
+                drop(table);
+                self.wait_event(sock_id, TCPEventKind::Acked);
+                table = self.sockets.write().unwrap();
+                socket = table
+                    .get_mut(&sock_id)
+                    .context(format!("no such socket: {:?}", sock_id))?;
+                // [note]受信がされウィンドウサイズが復活したので、送信サイズを再計算する
+                send_size = cmp::min(
+                    MSS,
+                    cmp::min(socket.send_param.window as usize, buffer.len() - cursor),
+                );
+            }
+            dbg!("current window size", socket.send_param.window);
 
             let seq = socket.send_param.next;
             let ack = socket.recv_param.next;
@@ -217,10 +318,20 @@ impl TCP {
             )?;
 
             cursor += send_size;
+
             // 【書籍】
             // > 送信後はそのペイロードのサイズ分だけsocket.send_param.nextを進めています
             // > Teruya Ono. Rust TCP Book (Japanese Edition) (p. 105). Kindle Edition. 
             socket.send_param.next += send_size as u32;
+
+            // 【書籍】3.7.6 スライディングウィンドウ
+            // [note] 送った分だけウィンドウサイズを減らしていく
+            socket.send_param.window -= send_size as u16;
+
+            // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
+            // send_windowが0になるまで送り続け，`while send_size == 0 {`のスコープで送信がブロックされる確率を下げるため
+            drop(table);
+            thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }
@@ -295,7 +406,7 @@ impl TCP {
                 TcpStatus::Listen => self.listen_handler(table, sock_id, &packet, remote_addr),
                 TcpStatus::SynRcvd => self.synrcvd_handler(table, sock_id, &packet),
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
-                // TcpStatus::Established => self.established_handler(socket, &packet),
+                TcpStatus::Established => self.established_handler(socket, &packet),
                 // TcpStatus::CloseWait | TcpStatus::LastAck => self.close_handler(socket, &packet),
                 // TcpStatus::FinWait1 | TcpStatus::FinWait2 => self.finwait_handler(socket, &packet),
                 _ => {
@@ -476,6 +587,43 @@ impl TCP {
         let mut e = lock.lock().unwrap();
         *e = Some(TCPEvent::new(sock_id, kind));
         cvar.notify_all();
+    }
+
+    /// SYNSENT状態のソケットに到着したパケットの処理
+    /// [note] Payloadのやり取りをしているということ
+    fn established_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        if socket.send_param.unacked_seq < packet.get_ack() 
+            && packet.get_ack() <= socket.send_param.next
+        {
+            // 【正常ケース】送信したパケットに対して正しくACKが返ってきたスコープ
+            socket.send_param.unacked_seq = packet.get_ack();
+            self.delete_acked_segment_from_retransmission_queue(socket); // 再送キューにあるエントリを外す
+        } else if socket.send_param.next < packet.get_ack() {
+            // 未送信セグメントに対するACKは破棄する
+            return Ok(());
+        }
+        if packet.get_flag() & tcpflags::ACK == 0 {
+            // ACKが立っていないパケットは破棄
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// ACKが正しく返ってきたときの内部処理
+    fn delete_acked_segment_from_retransmission_queue(&self, socket: &mut Socket) {
+        dbg!("ack accept", socket.send_param.unacked_seq);
+        while let Some(item) = socket.retransmission_queue.pop_front() {
+            if socket.send_param.unacked_seq > item.packet.get_seq() {
+                dbg!("successfully acked", item.packet.get_seq());
+                // ACKが正しく返ってきたので、ウィンドウサイズを増やす。
+                socket.send_param.window += item.packet.payload().len() as u16;
+                self.publish_event(socket.get_sock_id(), TCPEventKind::Acked);
+            } else {
+                // ackされてない．戻す．
+                socket.retransmission_queue.push_front(item);
+                break;
+            }
+        }
     }
 }
 

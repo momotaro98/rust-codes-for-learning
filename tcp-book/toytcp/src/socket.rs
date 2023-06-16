@@ -25,6 +25,9 @@ pub struct Socket {
     pub recv_param: RecvParam,
     pub status: TcpStatus,
 
+    // Section 3.7.4 確認応答と再送
+    pub retransmission_queue: VecDeque<RetransmissionQueueEntry>,
+
     // Section 3.6 for Passive Open
     pub connected_connection_queue: VecDeque<SockID>, // 接続済みソケットを保持するキュー．リスニングソケットのみ使用
     pub listening_socket: Option<SockID>, // 生成元のリスニングソケット．接続済みソケットのみ使用
@@ -115,7 +118,6 @@ pub struct RecvParam {
     pub tail: u32,        // 受信seqの最後尾
 }
 
-/// まだ利用しない
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub enum TcpStatus {
     Listen,
@@ -127,6 +129,24 @@ pub enum TcpStatus {
     TimeWait,
     CloseWait,
     LastAck,
+}
+
+/// 失敗時の再送用のセグメント(Packet)を保管するためのキュー。各ソケットが保持する。
+#[derive(Clone, Debug)]
+pub struct RetransmissionQueueEntry {
+    pub packet: TCPPacket,                    // 再送用のセグメント
+    pub latest_transmission_time: SystemTime, // タイムアウトを判定するための最後に送信された時刻
+    pub transmission_count: u8,               // 送信回数
+}
+
+impl RetransmissionQueueEntry {
+    fn new(packet: TCPPacket) -> Self {
+        Self {
+            packet,
+            latest_transmission_time: SystemTime::now(),
+            transmission_count: 1,
+        }
+    }
 }
 
 impl Display for TcpStatus {
@@ -174,6 +194,7 @@ impl Socket {
                 tail: 0,
             },
             status,
+            retransmission_queue: VecDeque::new(),
             connected_connection_queue: VecDeque::new(),
             listening_socket: None,
             sender,
@@ -215,6 +236,16 @@ impl Socket {
 
         dbg!("sent", &tcp_packet);
 
+        // [note] 【再送制御】
+        // Payloadが存在しない通常の"応答としてのACK"を再送すること(ACKのACKが来ることを期待すること)は無いので、
+        // ここで早期returnをしている。
+        // なぜなら、通信双方で応答に対する応答を期待してしまうと、無限にそのやり取りをすることになるので、
+        // ACKのACKは返さないことを仕様で決めている。
+        if payload.is_empty() && tcp_packet.get_flag() == tcpflags::ACK {
+            return Ok(sent_size);
+        }
+        self.retransmission_queue
+            .push_back(RetransmissionQueueEntry::new(tcp_packet));
         Ok(sent_size)
     }
 
