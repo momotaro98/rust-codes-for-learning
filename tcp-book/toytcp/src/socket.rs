@@ -109,14 +109,14 @@ pub struct Socket {
 pub struct SendParam {
     pub unacked_seq: u32, // 送信後まだACKされていないseqの先頭
     pub next: u32,        // 次の送信(予定)
-    pub window: u16,      // 送信ウィンドウサイズ
+    pub window: u16,      // 送信ウィンドウ [note] 送信先が適量のデータを受け取れるように制御するためのウィンドウ
     pub initial_seq: u32, // 初期送信seq
 }
 
 #[derive(Clone, Debug)]
 pub struct RecvParam {
     pub next: u32,        // 次受信するseq
-    pub window: u16,      // 受信ウィンドウ
+    pub window: u16,      // 受信ウィンドウ [note] ソケット受信バッファが適量のデータを受け取れるように制御するためのウィンドウ
     pub initial_seq: u32, // 初期受信seq
     pub tail: u32,        // 受信seqの最後尾
 }
